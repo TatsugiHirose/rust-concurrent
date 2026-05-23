@@ -19,7 +19,7 @@ impl Semaphore {
         let mut cnt = self.mutex.lock().unwrap();
         while *cnt >= self.max {
             // なんでwhileなんだろう
-            cnt = self.condvar.wait(cnt).unwrap();
+            cnt = self.condvar.wait(cnt).unwrap(); // waitによる新しいロックは返り値なので、ちゃんと変数で受け取ること
         }
         *cnt += 1;
     }

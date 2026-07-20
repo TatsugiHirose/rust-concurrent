@@ -117,3 +117,13 @@ fn main_scheculing() {
     executor.get_spawner().spawn(Hello::new());
     executor.run();
 }
+
+#[test]
+fn async_scheduling() {
+    let executor = Executor::new();
+    executor.get_spawner().spawn(async {
+        let hello = Hello::new();
+        hello.await;
+    });
+    executor.run();
+}

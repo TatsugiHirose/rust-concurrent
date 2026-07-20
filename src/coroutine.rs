@@ -1,3 +1,5 @@
+// 5.2.1 コルーチン
+
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};

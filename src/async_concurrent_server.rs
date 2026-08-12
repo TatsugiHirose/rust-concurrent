@@ -3,33 +3,82 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use futures::task::{ArcWake, waker_ref};
 use nix::errno::Errno;
 use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
-use nix::unistd::write;
 
-struct Executor {}
+/// 簡易のため、Future自身がWakerを持つようにしているらしい。
+struct Task {
+    /// 実行するコルーチン
+    ///
+    /// - BoxFutureはfuturesクレートの型。ほぼPin（メモリ移動しない型）に相当。
+    /// - poll()は &mut selfで呼ぶので、内部可変性を持たせるためにMutexにしているっぽい。
+    ///   これにより &Task からでも poll() が呼べるようになる。
+    /// - または、Executorが複数スレッドで動かす場合に、Mutexによって poll() の同時実行を防ぐことができる。
+    future: Mutex<BoxFuture<'static, ()>>,
+
+    /// Executorへスケジューリングするためのチャネル
+    sender: SyncSender<Arc<Self>>,
+}
+
+impl ArcWake for Task {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        let self0 = arc_self.clone();
+        arc_self.sender.send(self0).unwrap();
+    }
+}
+
+struct Executor {
+    sender: SyncSender<Arc<Task>>,
+    receiver: Receiver<Arc<Task>>,
+}
 
 impl Executor {
     fn new() -> Self {
-        Self {}
+        let (sender, receiver) = sync_channel(1024);
+        Self { sender, receiver }
     }
 
     fn get_spawner(&self) -> Spawner {
-        Spawner {}
+        Spawner {
+            sender: self.sender.clone(),
+        }
     }
 
-    fn run(&self) {}
+    fn run(&self) {
+        while let Ok(task) = self.receiver.recv() {
+            // pollを実行するためにはcontextが必要だから、作る
+            let waker = waker_ref(&task);
+            let mut ctx = Context::from_waker(&waker); // ここでやっとstdの型に合流
+
+            // poll
+            let mut future = task.future.lock().unwrap();
+            let _ = future.as_mut().poll(&mut ctx);
+        }
+    }
 }
 
-struct Spawner {}
+struct Spawner {
+    sender: SyncSender<Arc<Task>>,
+}
 
 impl Spawner {
-    fn spawn(&self, future: impl Future) {}
+    fn spawn(&self, future: impl Future<Output = ()> + 'static + Send) {
+        let future = future.boxed();
+        let task = Task {
+            future: Mutex::new(future),
+            sender: self.sender.clone(),
+        };
+        self.sender.send(Arc::new(task)).unwrap();
+    }
 }
 
 // kqueueだとeventfdが不要なので、以下の教科書の方法はとれなくなった。

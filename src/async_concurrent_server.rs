@@ -2,10 +2,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufWriter, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::fd::{BorrowedFd, RawFd};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::{Arc, Mutex};
-use std::task::Waker;
+use std::task::{Context, Poll, Waker};
 use std::thread;
 
 use nix::errno::Errno;
@@ -47,14 +47,16 @@ fn write_eventfd(fd: RawFd, n: usize) {
 }
 
 enum IOOps {
+    // イベントの追加及びWakerの追加を行うっぽい
     Add(EvFlags, RawFd, Waker),
+    // イベントの削除及びWakerの削除を行うっぽい
     Remove(RawFd),
 }
 
 struct IOSelector {
     wakers: Mutex<HashMap<RawFd, Waker>>,
     queue: Mutex<VecDeque<IOOps>>,
-    // macだからkqueue。ちなみに教科書はRawFdにしてるがepollも今ではそれを非推奨。
+    // epollのfd。macだからkqueue。ちなみに教科書はRawFdにしてるがepollも今ではそれを非推奨。
     epfd: Kqueue,
     // KEventはSyncを持たないので、kEventのident()が一応相当しそうな気がする。
     event: usize, // eventfd(Linuxのイベント通知I/F)のfd。
@@ -142,7 +144,8 @@ impl IOSelector {
                         }
                     }
                 } else {
-                    // eventfd以外のイベント
+                    // eventfd以外のイベント(どういうイベントが来るのだろうか？newの時点では、eventfdしか登録していないはずだが)
+                    //    ↑ 上のAddとかRemoveで登録してたわ。
                     // 実行キューに追加
                     let fd = event.udata() as RawFd;
                     let waker = wakers.remove(&fd).unwrap();
@@ -220,6 +223,9 @@ impl IOSelector {
     }
 }
 
+/// 非同期にTCPのリッスンとAcceptを行うための構造体
+///
+/// 重要なのは、Acceptを行うときに、Accept用の関数を直接呼ぶのではなく、Acceptを行うFutureを返すこと。
 struct AsyncListener {
     listener: TcpListener,
     selector: Arc<IOSelector>,
@@ -229,30 +235,44 @@ impl AsyncListener {
     fn listen(host: &str, selector: Arc<IOSelector>) -> Self {
         let listener = TcpListener::bind(host).unwrap();
 
-        // ノンブロッキングを指定
-        listener.set_nonblocking(true).unwrap();
+        // TCPリスナーにノンブロッキングを指定
+        listener.set_nonblocking(true).unwrap(); // 接続待ちになるなら、スレッドを止めず、即座にエラーを返す挙動になるだけらしい。
 
         Self { listener, selector }
     }
 
-    // 実際にAcceptを行わず、Acceptを行うFutureをリターンする
+    // コネクションをAcceptするためのFutureをリターンする
     fn accept(&self) -> Accept {
-        self.listener.accept();
-        Accept {}
+        Accept { listener: self }
+    }
+}
+impl Drop for AsyncListener {
+    fn drop(&mut self) {
+        // epollへの登録を解除する
+        self.selector.unregister(self.listener.as_raw_fd());
     }
 }
 
 // コネクションをAcceptするためのFuture
-struct Accept {}
+struct Accept<'a> {
+    listener: &'a AsyncListener,
+}
 
-impl Future for Accept {
-    type Output = (AsyncReader, BufWriter<TcpStream>, &'static str);
+impl<'a> Future for Accept<'a> {
+    type Output = (AsyncReader, BufWriter<TcpStream>, SocketAddr);
 
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        unimplemented!()
+    fn poll(self: std::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // ノンブロッキングモードにしたので、accept()はすぐに返る。接続がなければエラーになるはず。
+        match self.listener.listener.accept() {
+            Ok((stream, addr)) => {
+                let stream0 = stream.try_clone().unwrap();
+                Poll::Ready((unimplemented!(), BufWriter::new(stream), addr))
+            }
+            Err(_) => {
+                // TODO: もっとやらないといけないことあるよ
+                Poll::Pending
+            }
+        }
     }
 }
 

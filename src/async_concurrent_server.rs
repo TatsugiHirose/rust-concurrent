@@ -36,6 +36,9 @@ impl ArcWake for Task {
     }
 }
 
+/// タスクの実行を管理する構造体
+///
+/// Executorはタスクを受け取り、実行する役割を持つ。
 struct Executor {
     sender: SyncSender<Arc<Task>>,
     receiver: Receiver<Arc<Task>>,
@@ -66,6 +69,7 @@ impl Executor {
     }
 }
 
+/// タスクを生成し、Executorに送信する役割を持つ構造体
 struct Spawner {
     sender: SyncSender<Arc<Task>>,
 }
@@ -95,6 +99,8 @@ fn write_eventfd(fd: RawFd, n: usize) {
     write(unsafe { BorrowedFd::borrow_raw(fd) }, val).unwrap();
 }
 
+/// IO操作の種類を表す列挙型。
+/// イベントとそれに対応するWakerのAdd、Removeを表す。
 enum IOOps {
     // イベントの追加及びWakerの追加を行うっぽい
     Add(EvFlags, RawFd, Waker),
@@ -102,13 +108,17 @@ enum IOOps {
     Remove(RawFd),
 }
 
+/// イベントを監視し、対応するイベントやWakerを登録したり実行したりする構造体。
+/// newすると、内部でスレッドが立ち上がり、kqueueのイベント監視を開始する。
 struct IOSelector {
     wakers: Mutex<HashMap<RawFd, Waker>>,
+    /// IOの操作キュー。eventfd発行時にpopして処理する。
     queue: Mutex<VecDeque<IOOps>>,
-    // epollのfd。macだからkqueue。ちなみに教科書はRawFdにしてるがepollも今ではそれを非推奨。
+    /// epollのfd。MacだからKqueueオブジェクトで代用。ちなみに教科書はRawFdにしてるがepollも今ではそれを非推奨している。
     epfd: Kqueue,
-    // KEventはSyncを持たないので、kEventのident()が一応相当しそうな気がする。
-    event: usize, // eventfd(Linuxのイベント通知I/F)のfd。
+    /// eventfd(Linuxのイベント通知I/F)のfd。Macなので実際はkEventのident()で代用。
+    /// （KEventはSyncトレイトを持たないので、kEventのident()で代用してみている。）
+    event: usize,
 }
 
 impl IOSelector {

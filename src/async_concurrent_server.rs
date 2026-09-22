@@ -385,11 +385,37 @@ struct ReadLine<'a> {
 impl<'a> Future for ReadLine<'a> {
     type Output = Option<String>;
 
+    // 勝手に引数をmutに変えちゃっても良いの？？
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        unimplemented!()
+        let mut line = String::new();
+
+        // ノンブロッキングに設定してあるので、準備が整ってなかったら即エラーが返る
+        match self.reader.reader.read_line(&mut line) {
+            Ok(0) =>
+            // ストリームがEOFに達するとサイズ0が返る
+            {
+                Poll::Ready(None)
+            }
+            Ok(_) => Poll::Ready(Some(line)),
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // 読み込みできない場合は、epoll(kqueueだけど)に登録
+                    // （ここがミソか。失敗したらイベント機構にお任せすることで非同期が実現できるのね）
+                    self.reader.selector.register(
+                        EvFlags::EV_ADD,
+                        self.reader.fd,
+                        cx.waker().clone(),
+                    );
+                    Poll::Pending
+                } else {
+                    // それ以外のエラーは気にしないってことか。
+                    Poll::Ready(None)
+                }
+            }
+        }
     }
 }
 

@@ -240,7 +240,7 @@ impl IOSelector {
                 _ => panic!("epoll_ctl {err}"),
             }
         }
-        assert!(wakers.contains_key(&fd));
+        assert!(!wakers.contains_key(&fd));
         wakers.insert(fd, waker);
     }
     fn rm_event(&self, fd: RawFd, wakers: &mut HashMap<RawFd, Waker>) {

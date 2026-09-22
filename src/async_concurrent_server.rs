@@ -1,7 +1,7 @@
 // 5.3.2 IO多重化とasync/await
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -320,36 +320,73 @@ struct Accept<'a> {
 impl<'a> Future for Accept<'a> {
     type Output = (AsyncReader, BufWriter<TcpStream>, SocketAddr);
 
-    fn poll(self: std::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // ノンブロッキングモードにしたので、accept()はすぐに返る。接続がなければエラーになるはず。
         match self.listener.listener.accept() {
             Ok((stream, addr)) => {
                 let stream0 = stream.try_clone().unwrap();
-                Poll::Ready((unimplemented!(), BufWriter::new(stream), addr))
+                Poll::Ready((
+                    AsyncReader::new(stream0, self.listener.selector.clone()),
+                    BufWriter::new(stream),
+                    addr,
+                ))
             }
-            Err(_) => {
-                // TODO: もっとやらないといけないことあるよ
-                Poll::Pending
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // アクセプトすべきコネクションがない場合はepollに登録
+                    // （ここが非同期の肝。失敗したらイベントに任せるということ）
+                    self.listener.selector.register(
+                        EvFlags::EV_ADD,
+                        self.listener.listener.as_raw_fd(),
+                        cx.waker().clone(),
+                    );
+                    Poll::Pending
+                } else {
+                    panic!("accept: {err}");
+                }
             }
         }
     }
 }
 
-struct AsyncReader {}
+struct AsyncReader {
+    fd: RawFd,
+    reader: BufReader<TcpStream>,
+    selector: Arc<IOSelector>,
+}
 
 impl AsyncReader {
-    fn read_line(&self) -> ReadLine {
-        ReadLine {}
+    fn new(stream: TcpStream, selector: Arc<IOSelector>) -> Self {
+        // TcpStream をノンブロッキングに設定
+        stream.set_nonblocking(true).unwrap(); // え？ここでもやるの？？あと何でReaderでだけやるん？
+        Self {
+            fd: stream.as_raw_fd(),
+            reader: BufReader::new(stream),
+            selector,
+        }
+    }
+
+    fn read_line(&mut self) -> ReadLine {
+        ReadLine { reader: self }
     }
 }
 
-struct ReadLine {}
+impl Drop for AsyncReader {
+    // 今更だけど &mut だったのか。何でだろう。最後だから所有権奪っちゃえば良いのに。
+    fn drop(&mut self) {
+        self.selector.unregister(self.fd);
+    }
+}
 
-impl Future for ReadLine {
+struct ReadLine<'a> {
+    reader: &'a mut AsyncReader,
+}
+
+impl<'a> Future for ReadLine<'a> {
     type Output = Option<String>;
 
     fn poll(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         unimplemented!()

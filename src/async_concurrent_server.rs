@@ -191,6 +191,7 @@ impl IOSelector {
         while let Ok(nfds) = self.epfd.kevent(&[], &mut events, None) {
             let mut wakers = self.wakers.lock().unwrap();
             for event in events.iter().take(nfds) {
+                println!("event fd={}", event.ident());
                 if event.ident() == self.event {
                     // eventfdのイベントの場合
                     let mut q = self.queue.lock().unwrap();
@@ -252,7 +253,17 @@ impl IOSelector {
             0,
             fd as isize,
         );
-        self.epfd.kevent(&[event], &mut [], None).unwrap();
+        match self.epfd.kevent(&[event], &mut [], None) {
+            Ok(_) => {}
+            Err(Errno::ENOENT) => {
+                // epollと違ってkqueueだと、ONESHOTで登録したイベントは自動的に削除される。
+                // この時、DELETEするとENOENTが返り、unwrapするとパニックして、クライアント切断時にスレッドが死ぬ。
+                // なのでKqueueの場合何もしない。
+            }
+            Err(err) => {
+                println!("delete fd={fd}: {err:?}");
+            }
+        }
         wakers.remove(&fd);
     }
 
